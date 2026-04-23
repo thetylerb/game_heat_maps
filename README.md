@@ -1,182 +1,133 @@
 # Buck the Odds — NHL Playoff Analytics Pipeline
 
-A local Python pipeline that pulls live NHL game data and produces structured JSON output for generating prediction graphics and player performance grade cards.
+Pulls live NHL game data and produces structured JSON for player grade cards and series probability graphics.
 
-## Requirements
+---
 
-- Python 3.11+
-- Internet access for the NHL API (`api-web.nhle.com`)
+## Setup (one time)
 
 ```bash
 pip install -r requirements.txt
 ```
 
+Requires Python 3.11+ and an internet connection for the NHL API.
+
 ---
 
-## Scripts
+## Before Every Game
 
-### `fetch_game.py` — NHL Data Fetcher
+### Step 1 — Find the game ID
 
-Pulls raw data from the free NHL API and caches responses under `cache/`.
+Run this the morning of or any time before puck drop:
 
 ```bash
-# List all playoff games on a date
 python fetch_game.py --date 2026-04-23
-
-# Pull and summarise all data for a specific game
-python fetch_game.py --game 2026030123
-
-# Force-refresh (bypass cache)
-python fetch_game.py --game 2026030123 --force
 ```
 
-**Functions available for import:**
+Output looks like:
 
-| Function | Returns |
-|---|---|
-| `get_schedule(date_str)` | Full schedule JSON |
-| `get_play_by_play(game_id)` | Play-by-play event stream |
-| `get_boxscore(game_id)` | Player stats |
-| `get_landing(game_id)` | Shifts and on-ice context |
-| `list_playoff_games(date_str)` | Filtered list of playoff games |
-| `is_game_final(game_id)` | `True` if game state is FINAL/OFF |
+```
+Playoff games on 2026-04-23:
+  [2026030123]  PHI @ PIT  0-0  (FUT)  PPG Paints Arena
+  [2026030124]  EDM @ VGK  0-0  (FUT)  T-Mobile Arena
+```
+
+Copy the game ID in brackets for the game you're covering.
 
 ---
 
-### `hdc_calculator.py` — High Danger Chance Calculator
+### Step 2 — Know your three inputs
 
-Classifies every shot in the play-by-play by danger zone and computes per-player xG and HDC stats.
+You need these before you can run the pipeline:
 
-**Danger zones (NHL rink, center = 0,0, nets at x ≈ ±89):**
+| Input | Flag | What it is |
+|---|---|---|
+| Game ID | `--game` | From Step 1 |
+| Your team | `--team` | Three-letter abbreviation, e.g. `PHI` |
+| Opponent | `--opponent` | e.g. `PIT` |
+| Pre-series win prob | `--p` | Your team's per-game win probability at the start of the series (use implied odds from the opening line, e.g. `-160` → `0.615`) |
+| Series wins | `--series-wins` | Your team's wins going **into** this game |
+| Opponent wins | `--opponent-wins` | Opponent wins going into this game |
 
-| Zone | Criteria |
-|---|---|
-| **High** | ≤10 ft from net (crease), OR ≤20 ft AND within royal-road slot (|y| ≤ 22 ft) |
-| **Medium** | ≤40 ft from net (faceoff circle range) |
-| **Low** | >40 ft (perimeter, point shots) |
+**How to convert moneyline odds to `--p`:**
 
-**xG weights:** High = 0.35, Medium = 0.10, Low = 0.03
+| Moneyline | Formula | Example |
+|---|---|---|
+| Favorite (negative) | `odds / (odds + 100)` | `-160` → `160/260` = `0.615` |
+| Underdog (positive) | `100 / (odds + 100)` | `+140` → `100/240` = `0.417` |
 
-```python
-from fetch_game import get_play_by_play, get_landing
-from hdc_calculator import calculate_hdc
-
-pbp     = get_play_by_play("2026030123")
-landing = get_landing("2026030123")
-stats   = calculate_hdc(pbp, landing)
-
-# stats[player_id] → {hdc_for, hdc_against, xgf, xga, ...}
-```
+Use the opening series line, not the game-by-game line — `--p` stays fixed for the entire series.
 
 ---
 
-### `grader.py` — Player Grader
+### Step 3 — Start watch mode before puck drop
 
-Grades every player A+ through F using position-specific weights.
-
-**Position weights:**
-
-| Metric | Forwards | Defensemen | Goalies |
-|---|---|---|---|
-| Goals + Assists | 30% | — | — |
-| xGF on-ice | 25% | — | — |
-| HDC generated | 20% | — | — |
-| xGA on-ice | — | 30% | — |
-| HDC against | — | 25% | — |
-| Blocked shots | — | 15% | — |
-| Assists | — | 15% | — |
-| Plus/minus | 15% | 15% | — |
-| Penalties (negative) | 10% | — | — |
-| Save% vs xSV% | — | — | 40% |
-| HDC save% | — | — | 40% |
-| Goals against | — | — | 20% |
-
-**Grade scale:** 95+ = A+, 90 = A, 85 = A-, 80 = B+, 75 = B, 70 = B-, 65 = C+, 60 = C, 55 = C-, 50 = D+, 45 = D, <45 = F
-
-```python
-from grader import grade_players
-
-grades = grade_players(boxscore, hdc_stats)
-# grades['PHI'] → [{name, position, grade, verdict, stats}, ...]
-```
-
----
-
-### `series_prob.py` — Series Win Probability
-
-Markov chain series probability with constant per-game win probability.
-
-```python
-from series_prob import series_win_probability, series_history
-
-# Current probability from series state
-prob = series_win_probability(p=0.55, wins_a=2, wins_b=1)
-
-# Full history across a series
-history = series_history(p=0.55, results=['A', 'B', 'A'])
-# Returns [pre_series_prob, after_g1, after_g2, after_g3]
-```
-
----
-
-### `pipeline.py` — Master Pipeline
-
-Ties everything together. Run after a game ends to get a full JSON output.
+Run this command before the game starts. It will poll the NHL API every 60 seconds and automatically process the data the moment the game goes final.
 
 ```bash
-# Basic usage (after game is final)
 python pipeline.py \
     --game 2026030123 \
     --team PHI \
     --opponent PIT \
-    --p 0.69 \
-    --series-wins 3 \
-    --opponent-wins 0
+    --p 0.615 \
+    --series-wins 1 \
+    --opponent-wins 0 \
+    --watch
+```
 
-# With explicit game-by-game results for an accurate series history graph
+Leave the terminal open. When the game ends you'll see:
+
+```
+[watch] Game is final. Running pipeline...
+[pipeline] Done. Output written to output/2026030123.json
+```
+
+Your JSON file is ready to feed into graphics.
+
+---
+
+### Optional: add game-by-game results for an accurate series history graph
+
+If you've been tracking who won each game, pass them with `--results`. Use `A` for your team, `B` for the opponent:
+
+```bash
 python pipeline.py \
     --game 2026030123 \
     --team PHI \
     --opponent PIT \
-    --p 0.69 \
+    --p 0.615 \
+    --series-wins 2 \
+    --opponent-wins 1 \
+    --results A B A \
+    --watch
+```
+
+This gives you an accurate `series_history` probability trace in the output (one value per game played, starting from the pre-series baseline). Without `--results` the pipeline will infer a plausible sequence from the standings.
+
+---
+
+## After the Game (manual run)
+
+If you forgot to start watch mode, run the pipeline manually once the game is final:
+
+```bash
+python pipeline.py \
+    --game 2026030123 \
+    --team PHI \
+    --opponent PIT \
+    --p 0.615 \
     --series-wins 2 \
     --opponent-wins 1 \
     --results A B A
-
-# Watch mode — polls every 60 s during a live game, runs automatically when final
-python pipeline.py \
-    --game 2026030123 \
-    --team PHI \
-    --opponent PIT \
-    --p 0.69 \
-    --series-wins 3 \
-    --opponent-wins 0 \
-    --watch
-
-# Custom poll interval (30 s)
-python pipeline.py ... --watch --poll-interval 30
 ```
 
-**Arguments:**
-
-| Flag | Required | Description |
-|---|---|---|
-| `--game` | Yes | NHL game ID (e.g. `2026030123`) |
-| `--team` | Yes | Your team's abbreviation (e.g. `PHI`) |
-| `--opponent` | Yes | Opponent abbreviation (e.g. `PIT`) |
-| `--p` | Yes | Pre-series per-game win probability for `--team` |
-| `--series-wins` | Yes | Your team's wins **after** this game |
-| `--opponent-wins` | Yes | Opponent wins |
-| `--results` | No | Space-separated game results, e.g. `A A B A` |
-| `--watch` | No | Poll live; run pipeline when game ends |
-| `--poll-interval` | No | Seconds between polls (default 60) |
-| `--force` | No | Bypass API cache |
-
-**Output:** `output/<game_id>.json`
+If the game isn't final yet it will tell you and exit cleanly.
 
 ---
 
-## Output Schema
+## Output
+
+Written to `output/<game_id>.json`:
 
 ```json
 {
@@ -185,9 +136,9 @@ python pipeline.py ... --watch --poll-interval 30
   "home": "PIT",
   "away": "PHI",
   "score": {"PHI": 5, "PIT": 2},
-  "series": {"PHI": 3, "PIT": 0},
-  "series_win_prob": {"PHI": 0.97, "PIT": 0.03},
-  "series_history": [0.69, 0.83, 0.94, 0.97],
+  "series": {"PHI": 2, "PIT": 1},
+  "series_win_prob": {"PHI": 0.73, "PIT": 0.27},
+  "series_history": [0.615, 0.72, 0.58, 0.73],
   "player_grades": {
     "PHI": [
       {
@@ -210,35 +161,50 @@ python pipeline.py ... --watch --poll-interval 30
 
 ---
 
+## Grade Scale
+
+| Score | Grade | Score | Grade |
+|---|---|---|---|
+| 95+ | A+ | 64–60 | C |
+| 90–94 | A | 59–55 | C- |
+| 85–89 | A- | 54–50 | D+ |
+| 80–84 | B+ | 49–45 | D |
+| 75–79 | B | <45 | F |
+| 70–74 | B- | | |
+| 65–69 | C+ | | |
+
+**Position weights:**
+
+| Metric | F | D | G |
+|---|---|---|---|
+| Goals + Assists | 30% | — | — |
+| xGF on-ice | 25% | — | — |
+| HDC generated | 20% | — | — |
+| Plus/minus | 15% | 15% | — |
+| Penalties | 10% | — | — |
+| xGA on-ice | — | 30% | — |
+| HDC against | — | 25% | — |
+| Blocked shots | — | 15% | — |
+| Assists | — | 15% | — |
+| Save% vs xSV% | — | — | 40% |
+| HDC save% | — | — | 40% |
+| Goals against | — | — | 20% |
+
+---
+
 ## File Structure
 
 ```
 game_heat_maps/
-├── fetch_game.py       # NHL API fetcher (all four endpoints)
+├── fetch_game.py       # NHL API fetcher
 ├── hdc_calculator.py   # Shot classification and xG/HDC stats
-├── grader.py           # Letter grader + one-line verdict generator
+├── grader.py           # Letter grader + verdict generator
 ├── series_prob.py      # Markov chain series win probability
-├── pipeline.py         # Master orchestrator (run this)
+├── pipeline.py         # Master pipeline — the one you run
 ├── requirements.txt
 ├── README.md
-├── cache/              # Auto-created — raw API responses
+├── cache/              # Auto-created — raw API responses (cached)
 └── output/             # Auto-created — pipeline JSON output
 ```
 
----
-
-## How to Find a Game ID
-
-```bash
-python fetch_game.py --date 2026-04-23
-```
-
-Game IDs follow the format `YYYY03XXXX` where `03` indicates playoffs. Copy the ID from the output and pass it to `--game`.
-
----
-
-## Notes
-
-- All API responses are cached in `cache/` — re-running with the same game ID is instant without `--force`.
-- On-ice player attribution uses embedded event data when available; falls back to shift reconstruction from the landing endpoint, then to shooter-only if neither is present.
-- The `--results` flag is recommended for accurate series history graphs. Without it, the pipeline infers a plausible game sequence from the standings.
+All API responses are cached in `cache/` — re-running for the same game is instant. Use `--force` to bypass the cache and re-fetch live data.
